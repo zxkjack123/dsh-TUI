@@ -791,6 +791,52 @@ export function dshApprovalNotice(
 }
 
 /**
+ * Build the one-shot notice for a parked ask whose agent is not the attached
+ * session. Background sessions still park for the panel and the needs-input
+ * badge, which is easy to miss while the terminal shows another session; the
+ * first such ask announces itself, and later asks from the same agent do not.
+ * @param seen - Agent ids already announced by this process; a new one is added.
+ * @param request - The asking agent id, gated tool and resolved reason.
+ * @param session - The attached session title and backend.
+ * @returns The notice to announce, or undefined when that agent already had one.
+ */
+export function takeBackgroundApprovalNotice(
+  seen: Set<string>,
+  request: { readonly agentId: string; readonly toolName: string; readonly reason?: string },
+  session: { readonly title: string; readonly backendId: string },
+): ApprovalNotice | undefined {
+  if (seen.has(request.agentId)) return undefined
+  seen.add(request.agentId)
+  return {
+    sessionTitle: `${session.title} (${request.agentId})`,
+    toolName: request.toolName,
+    ...(request.reason === undefined ? {} : { reason: request.reason }),
+    backendId: session.backendId,
+  }
+}
+
+/**
+ * Which surface announces a background session's first parked ask. The OS
+ * notification gate deliberately stays silent while this terminal is focused,
+ * but a focused terminal showing ANOTHER session is exactly where a background
+ * ask is easiest to miss, so that case falls back to the in-app toast. The
+ * user's `off` switch still suppresses both.
+ * @param settings - The live task-notification settings.
+ * @param stdoutTty - Whether stdout is a TTY right now.
+ * @param focused - Whether the terminal reports focus right now.
+ * @returns `'notification'` when the OS path is due, `'toast'` for the in-app
+ *   surface, or `'none'` when the user turned notifications off.
+ */
+export function backgroundApprovalLane(
+  settings: TaskNotificationSettings,
+  stdoutTty: boolean,
+  focused: boolean,
+): 'notification' | 'toast' | 'none' {
+  if (settings.condition === 'off') return 'none'
+  return notificationAlertsEnabled(settings, stdoutTty, focused) ? 'notification' : 'toast'
+}
+
+/**
  * Whether a notification queued before the Windows transport may still be
  * dispatched: the window must still own the channel, the switch must not have
  * been turned off, the notice must speak for the session that is attached now,
@@ -2894,6 +2940,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // (/new, /resume, rewind), so ownership is re-evaluated per request.
   const approvalStore = new ApprovalStore(adapterRuntimeFor(ctx))
   bindApprovalStore(ctx, approvalStore)
+  /** Background agents that already announced their first parked ask. */
+  const announcedBackgroundApprovals = new Set<string>()
   // A non-DSH backend answers its own permission prompts: the DSH answerer
   // is not registered for it.
   // The in-process DSH kernel installs it in `attachDsh`.
@@ -2902,9 +2950,11 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       dshCtx.on('approval/request', (req, next) => {
         // Park first: the ask must reach the panel even if announcing it fails.
         const parked = approvalStore.park(req).catch(() => next())
-        // Only the attached session's ask belongs to this window: a background
-        // session or a subagent carries its own agent id, so it still parks for
-        // the panel and its needs-input badge but must not raise a toast here.
+        // The attached session's ask announces every time. A background
+        // session or subagent carries its own agent id: it still parks for the
+        // panel and the needs-input badge, but only its FIRST ask announces —
+        // a hidden ask must not stay hidden, and repeated ones must not become
+        // noise.
         const agentId = String(req.agent.id)
         const notice = dshApprovalNotice(
           { agentId, toolName: req.toolName, reason: reasonOf(req) },
@@ -2917,6 +2967,31 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
             const detail = error instanceof Error ? error.message : String(error)
             logForDebugging(`approval notification failed (${detail})`)
           }
+          return parked
+        }
+        const backgroundNotice = takeBackgroundApprovalNotice(
+          announcedBackgroundApprovals,
+          { agentId, toolName: req.toolName, reason: reasonOf(req) },
+          { title: rawChannel.sessionTitle, backendId: rawChannel.sessionRef.backendId },
+        )
+        if (backgroundNotice === undefined) return parked
+        try {
+          const lane = backgroundApprovalLane(
+            notificationSettings,
+            process.stdout.isTTY === true,
+            getTerminalFocused(),
+          )
+          if (lane === 'notification') {
+            announceApproval(backgroundNotice, () => approvalStore.hasParkedRequest(req))
+          } else if (lane === 'toast') {
+            rawChannel.notify(
+              approvalNotificationMessage(backgroundNotice.sessionTitle, backgroundNotice.toolName, backgroundNotice.reason),
+              { color: 'warning', timeoutMs: 8000 },
+            )
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          logForDebugging(`background approval notification failed (${detail})`)
         }
         return parked
       })

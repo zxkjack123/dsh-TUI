@@ -457,6 +457,7 @@ export class ApprovalStore implements PermissionPanelSource {
    */
   park(req: ApprovalRequest): Promise<ApprovalOutcome> {
     assertCapabilityShadowPolicy('host.presentation.approve', this.runtime.mode, this.runtime.slices)
+    if (req.signal?.aborted) return Promise.resolve('cancelled')
     return new Promise<ApprovalOutcome>(resolve => {
       const command = commandOf(req)
       const reason = reasonOf(req)
@@ -502,11 +503,13 @@ export class ApprovalStore implements PermissionPanelSource {
             this.rebuildSnapshot()
             pending.resolve('cancelled')
             this.startNext()
+            this.emit()
             return
           }
           const at = this.queue.indexOf(pending)
           if (at >= 0) this.queue.splice(at, 1)
           pending.resolve('cancelled')
+          this.emit()
         },
       }
       req.signal?.addEventListener('abort', pending.onAbort, { once: true })
