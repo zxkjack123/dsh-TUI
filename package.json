@@ -210,6 +210,7 @@
     "verify:chat-overlay": "node --import tsx/esm scripts/verify-chat-overlay.ts",
     "verify:approval-visibility": "node --import tsx/esm scripts/verify-approval-visibility.tsx && npm run verify:approval-source-badge",
     "verify:approval-source-badge": "node --import tsx/esm scripts/verify-approval-source-badge.tsx",
+    "verify:approval-withdrawal": "node --import tsx/esm scripts/verify-approval-withdrawal.ts",
     "verify:permission-roster": "node scripts/verify-permission-roster.mjs",
     "verify:permission-modes": "node scripts/verify-permission-modes.mjs",
     "verify:permission-prefs": "node scripts/verify-permission-prefs.mjs",

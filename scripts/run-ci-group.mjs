@@ -1587,6 +1587,11 @@ const GROUPS = {
 // 允许、tool/result 落定后孪生弹出/渲染时徽标必须补上（弹出时 + 读取
 // 当前条时重跑活跃判定）。
     ["verify-approval-source-badge", ['node', '--import', 'tsx/esm', 'scripts/verify-approval-source-badge.tsx']],
+// 审批撤回与后台可见性：他处（浏览器/其他应答者）答复后服务会 abort 请求信号，
+// 面板条目与 needs-input 徽标必须随之消失并推送给订阅者（活动条、排队条、入队前
+// 已 abort 三条路径）；后台会话的第一次 parked ask 播报一次（带 agentId/工具/原因），
+// 同一 agent 后续 ask 只保留徽标不重复播报。
+    ["verify-approval-withdrawal", ['node', '--import', 'tsx/esm', 'scripts/verify-approval-withdrawal.ts']],
 // 单行超长文本折叠回归（用户反馈：单行超长文本默认整行渲染，铺成上千视觉
 // 行拖慢转录）：折叠阈值常量 1000 字符、行边界不被改写、短文本零分配快路径；
 // 真实 MessageList 下 user 消息 / assistant 正文 / 工具卡标题（单行超长命令）
