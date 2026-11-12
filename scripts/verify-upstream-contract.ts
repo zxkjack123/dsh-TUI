@@ -29,6 +29,18 @@ assert.deepEqual(parseUpstreamVersion('0.1.2-alpha.3'), [0, 1, 2, 'alpha', 3])
 assert.ok(compareVersions(alpha, beta) < 0 && compareVersions(beta, rc) < 0)
 assert.ok(compareVersions(rc, parseUpstreamVersion('0.1.1-rc.2')!) > 0)
 assert.equal(parseUpstreamVersion('0.1.2'), undefined)
+// Local builds tag the validated core (`-local.<sha>`). The tag must not make
+// the line unparseable: an unparseable engine degrades every feature gate to
+// "too old" and reports the host as broken at boot.
+assert.deepEqual(parseUpstreamVersion('0.2.2-rc.2-local.aa90b96'), [0, 2, 2, 'rc', 2])
+assert.ok(
+  compareVersions(
+    parseUpstreamVersion('0.2.2-rc.2-local.aa90b96')!,
+    parseUpstreamVersion(UPSTREAM_VALIDATED_VERSION)!,
+  ) > 0,
+)
+assert.equal(parseUpstreamVersion('0.2.2-dev.1'), undefined)
+assert.equal(parseUpstreamVersion('0.2.2-local.aa90b96'), undefined)
 assert.match(UPSTREAM_VALIDATED_LABEL, /^0\.2\.2-rc\.1/u)
 // The primary line must itself be a validated line. Without this, dropping
 // the primary from UPSTREAM_VALIDATED_VERSIONS still passes the prefix match
@@ -53,6 +65,24 @@ assert.deepEqual(upstreamDrift(mixedVersions), [])
 assert.deepEqual(upstreamDriftSummary(mixedVersions), {
   kind: 'mixed',
   versions: ['0.1.1-rc.2', '0.1.2-rc.1'],
+})
+
+// A lone local build is NEWER than the validated line, not broken. The boot
+// notice must name the drift instead of claiming the host is anomalous.
+const localBuildVersions: Record<string, string | undefined> = Object.fromEntries(
+  UPSTREAM_BLESSED_PACKAGES.map(packageName => [
+    packageName,
+    UPSTREAM_FRAMEWORK_MAJORS[packageName] === 4
+      ? '4.0.1'
+      : UPSTREAM_FRAMEWORK_MAJORS[packageName] === 3
+        ? '3.18.1'
+        : '0.2.2-rc.2-local.aa90b96',
+  ]),
+)
+assert.deepEqual(installedUpstreamLines(localBuildVersions), ['0.2.2-rc.2-local.aa90b96'])
+assert.deepEqual(upstreamDriftSummary(localBuildVersions), {
+  kind: 'newer',
+  versions: ['0.2.2-rc.2-local.aa90b96'],
 })
 
 const installedLines = installedUpstreamLines()
