@@ -183,7 +183,7 @@ export type UpstreamVersionTuple = readonly [number, number, number, UpstreamPre
 
 /** Parse an upstream prerelease version; undefined when unparseable. */
 export function parseUpstreamVersion(version: string | undefined): UpstreamVersionTuple | undefined {
-  const match = /^(\d+)\.(\d+)\.(\d+)-(alpha|beta|rc)\.(\d+)$/u.exec(version ?? '')
+  const match = /^(\d+)\.(\d+)\.(\d+)-(alpha|beta|rc)\.(\d+)(?:[-.+].*)?$/u.exec(version ?? '')
   return match === null
     ? undefined
     : [Number(match[1]), Number(match[2]), Number(match[3]), match[4] as UpstreamPrereleaseChannel, Number(match[5])]
