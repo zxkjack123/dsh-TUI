@@ -800,13 +800,35 @@ export function dshApprovalNotice(
  * @param session - The attached session title and backend.
  * @returns The notice to announce, or undefined when that agent already had one.
  */
+/** Floor between two announcements for one agent, so an ask/answer loop cannot storm. */
+export const BACKGROUND_APPROVAL_REANNOUNCE_FLOOR_MS = 1_500
+
+/**
+ * Decide whether a background agent's ask should announce now.
+ *
+ * The unit is the **burst**, not the agent: while any ask from this agent is
+ * already parked, a further ask is the same interruption and stays quiet. Once
+ * the queue drains, the next ask is a new decision and must speak — the
+ * previous rule (announce the first ask of the process, then never again) left
+ * every later decision invisible unless the operator happened to open that
+ * session, which is exactly when they are least likely to.
+ * @param seen - Last announce time per agent id; updated when this ask speaks.
+ * @param request - The ask being parked.
+ * @param session - Title and backend of the session that asked.
+ * @param state - `alreadyPending` is the pending set read before this park; `now` defaults to `Date.now()`.
+ * @returns The notice to announce, or `undefined` when this ask stays quiet.
+ */
 export function takeBackgroundApprovalNotice(
-  seen: Set<string>,
+  seen: Map<string, number>,
   request: { readonly agentId: string; readonly toolName: string; readonly reason?: string },
   session: { readonly title: string; readonly backendId: string },
+  state: { readonly alreadyPending: boolean; readonly now?: number },
 ): ApprovalNotice | undefined {
-  if (seen.has(request.agentId)) return undefined
-  seen.add(request.agentId)
+  if (state.alreadyPending) return undefined
+  const now = state.now ?? Date.now()
+  const last = seen.get(request.agentId)
+  if (last !== undefined && now - last < BACKGROUND_APPROVAL_REANNOUNCE_FLOOR_MS) return undefined
+  seen.set(request.agentId, now)
   return {
     sessionTitle: `${session.title} (${request.agentId})`,
     toolName: request.toolName,
@@ -2940,21 +2962,25 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // (/new, /resume, rewind), so ownership is re-evaluated per request.
   const approvalStore = new ApprovalStore(adapterRuntimeFor(ctx))
   bindApprovalStore(ctx, approvalStore)
-  /** Background agents that already announced their first parked ask. */
-  const announcedBackgroundApprovals = new Set<string>()
+  /** Background agents that already announced their current parked ask, by last announce time. */
+  const announcedBackgroundApprovals = new Map<string, number>()
   // A non-DSH backend answers its own permission prompts: the DSH answerer
   // is not registered for it.
   // The in-process DSH kernel installs it in `attachDsh`.
   const mountDshApprovals = (dshCtx: Context): void => {
     if (dshCtx.get('approval') !== undefined && backendStart === undefined) {
       dshCtx.on('approval/request', (req, next) => {
-        // Park first: the ask must reach the panel even if announcing it fails.
+        // Read the pending set BEFORE parking: park() pushes this ask at once,
+        // so a post-park read cannot tell the burst's first ask from its tenth.
+        const alreadyPending = approvalStore.pendingAgentIds().includes(String(req.agent.id))
+        // Park next: the ask must reach the panel even if announcing it fails.
         const parked = approvalStore.park(req).catch(() => next())
         // The attached session's ask announces every time. A background
         // session or subagent carries its own agent id: it still parks for the
-        // panel and the needs-input badge, but only its FIRST ask announces —
-        // a hidden ask must not stay hidden, and repeated ones must not become
-        // noise.
+        // panel and the needs-input badge. It announces the FIRST ask of every
+        // burst (nothing queued for it a moment ago) and stays quiet for the
+        // rest of that burst — so a new decision never goes unheard, while a
+        // queue of asks answering one by one still speaks once.
         const agentId = String(req.agent.id)
         const notice = dshApprovalNotice(
           { agentId, toolName: req.toolName, reason: reasonOf(req) },
@@ -2973,6 +2999,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           announcedBackgroundApprovals,
           { agentId, toolName: req.toolName, reason: reasonOf(req) },
           { title: rawChannel.sessionTitle, backendId: rawChannel.sessionRef.backendId },
+          { alreadyPending },
         )
         if (backgroundNotice === undefined) return parked
         try {
@@ -3010,6 +3037,19 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   if (!dshInEntry) mountDshApprovals(ctx)
   // The agent view reads parked ask ids for its "needs input" state.
   rawChannel.bindApprovalStore(approvalStore)
+  // Persistent status entry: an ask parked by a session the operator is not
+  // looking at has no panel of its own, and the one-shot announcement can be
+  // missed. The count stays on the status line until the queue drains.
+  const approvalStatusStore = getHostStatusStore(ctx.get('tuiStatus') as TuiStatusRuntime | undefined)
+  if (approvalStatusStore !== undefined) {
+    const paintApprovalStatus = (): void => {
+      const waiting = approvalStore.pendingAgentIds().length
+      approvalStatusStore.set('approvals-pending', waiting === 0 ? undefined : `NEEDS INPUT ${waiting}`)
+    }
+    approvalStore.subscribe(paintApprovalStatus)
+    paintApprovalStatus()
+    ctx.effect(() => () => approvalStatusStore.set('approvals-pending', undefined))
+  }
   // A child waiting on a questionnaire is unsettled too, so its parent row
   // must not claim completion while the panel holds the answer.
   rawChannel.bindQuestionStore(questionStore)
