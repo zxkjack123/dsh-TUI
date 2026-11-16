@@ -46,6 +46,7 @@ import { QuestionStore, bindQuestionStore } from './questions.js'
 import type { QuestionItem, QuestionRequest } from '../channel/questions.js'
 import { prepareQuestionAnswerer } from './questions-answerer.js'
 import { adapterRuntimeFor } from '../adapter/kernel/runtime-context.js'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { ApprovalStore, bindApprovalStore, reasonOf } from './approvals.js'
 import { PermissionStore } from '../channel/permissions.js'
 import { registerPromptDebug } from './promptDebug.js'
@@ -2974,7 +2975,17 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // so a post-park read cannot tell the burst's first ask from its tenth.
         const alreadyPending = approvalStore.pendingAgentIds().includes(String(req.agent.id))
         // Park next: the ask must reach the panel even if announcing it fails.
-        const parked = approvalStore.park(req).catch(() => next())
+        // 2026-11-17：prepend 之后必须显式下传 next()，否则 Web 侧被饿死（手机看不到审批框）。
+        // 语义 = 审批竞速：TUI 面板与 Web 端同时挂起，任一端作答都生效。
+        // 外部（Web）先作答时顺手把本端面板收掉；反向由服务端 lifetime abort 收敛。
+        // next() 无答案者时返回 undefined，这里映射为 'unavailable' 以符合 handler 的返回契约。
+        const nextPromise = next().then((outcome): ApprovalOutcome => {
+          if (outcome !== undefined && approvalStore.hasParkedRequest(req))
+            approvalStore.decide(outcome === 'allowed-once' ? 'allowed-once' : 'rejected')
+          return outcome ?? 'unavailable'
+        })
+        const parked = approvalStore.park(req).catch((): ApprovalOutcome => 'cancelled')
+        const raceParked = (p: Promise<ApprovalOutcome>) => Promise.race<ApprovalOutcome>([p, nextPromise])
         // The attached session's ask announces every time. A background
         // session or subagent carries its own agent id: it still parks for the
         // panel and the needs-input badge. It announces the FIRST ask of every
@@ -2993,7 +3004,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
             const detail = error instanceof Error ? error.message : String(error)
             logForDebugging(`approval notification failed (${detail})`)
           }
-          return parked
+          return raceParked(parked)
         }
         const backgroundNotice = takeBackgroundApprovalNotice(
           announcedBackgroundApprovals,
@@ -3001,7 +3012,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           { title: rawChannel.sessionTitle, backendId: rawChannel.sessionRef.backendId },
           { alreadyPending },
         )
-        if (backgroundNotice === undefined) return parked
+        if (backgroundNotice === undefined) return raceParked(parked)
         try {
           const lane = backgroundApprovalLane(
             notificationSettings,
@@ -3020,8 +3031,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           const detail = error instanceof Error ? error.message : String(error)
           logForDebugging(`background approval notification failed (${detail})`)
         }
-        return parked
-      })
+        return raceParked(parked)
+      }, true) // prepend：Web 侧 approval/request 先注册且不下传时会把 TUI 饿死
       // Badge-flip push (P-4): React does not know the session log appended —
       // a source-badge verdict that only flips inside getSnapshot() surfaces
       // solely when something else re-renders. Feed the session firehose to
